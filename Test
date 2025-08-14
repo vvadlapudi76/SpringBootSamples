@@ -1,0 +1,118 @@
+@ExtendWith(MockitoExtension.class)
+class Test {
+
+    @Mock
+    private OrderApprovalRepository orderApprovalRepository;
+
+    @Mock
+    private ExecutionStepService executionStepService;
+
+    @InjectMocks
+    private OrderApprovalService service;
+
+    private OrderOutput orderOutput;
+    private OrderOutputData orderOutputData;
+    private List<ExecutionStepDto> steps;
+
+    @BeforeEach
+    void setUp() {
+        // Mock order output data
+        orderOutputData = new OrderOutputData();
+        orderOutputData.setOrderStatus("SUCCESS");
+
+        OneApproval oneApproval = new OneApproval();
+        oneApproval.setBusinessManager(List.of(new BusinessManager(new OrderOutputResult("APPROVED", Instant.now(), "desc"))));
+        oneApproval.setCsiManager(List.of(new CsiManager(new OrderOutputResult("APPROVED", Instant.now(), "desc"))));
+        oneApproval.setTenantOps(List.of(new TenantOps(new OrderOutputResult("APPROVED", Instant.now(), "desc"))));
+        orderOutputData.setOneApproval(List.of(oneApproval));
+
+        orderOutput = new OrderOutput();
+        orderOutput.setId("order1");
+        orderOutput.setData(orderOutputData);
+
+        // Mock execution steps
+        Component comp = new Component();
+        comp.setIdentifier("comp1");
+
+        ExecutionStepDto step = new ExecutionStepDto();
+        step.setId("step1");
+        step.setComponents(List.of(comp));
+        steps = List.of(step);
+    }
+
+    @Test
+    void testProcessApprovals_happyPath() throws OrderException {
+        when(executionStepService.findStepsByOrderId("order1")).thenReturn(steps);
+        when(orderApprovalRepository.insert(any(Flux.class)))
+                .thenReturn(Flux.empty());
+
+        service.processApprovals(orderOutput);
+
+        verify(executionStepService).updateSteps(eq("order1"),
+                eq(ItemStatus.SUCCESS),
+                eq(ComponentExecutionStatus.SUCCESS));
+        verify(orderApprovalRepository).insert(any(Flux.class));
+    }
+
+    @Test
+    void testProcessApprovals_noSteps() throws OrderException {
+        when(executionStepService.findStepsByOrderId("order1")).thenReturn(Collections.emptyList());
+
+        service.processApprovals(orderOutput);
+
+        verify(executionStepService, never()).updateSteps(any(), any(), any());
+    }
+
+    @Test
+    void testProcessApprovals_exception() {
+        when(executionStepService.findStepsByOrderId(any())).thenThrow(new RuntimeException("boom"));
+
+        assertThrows(OrderException.class, () -> service.processApprovals(orderOutput));
+    }
+
+    @Test
+    void testFindOrderApprovalsByOrderId() throws OrderException {
+        OrderApprovalDto dto = new OrderApprovalDto();
+        dto.setOrderId("order1");
+
+        when(orderApprovalRepository.findOrderApprovalsByOrderId(eq("order1"), any(Sort.class)))
+                .thenReturn(Flux.just(dto));
+
+        StepVerifier.create(service.findOrderApprovalsByOrderId("order1"))
+                .expectNextMatches(list -> list.size() == 1 && "order1".equals(list.get(0).getOrderId()))
+                .verifyComplete();
+    }
+
+    @Test
+    void testFindOrderApprovalsByOrderId_exception() {
+        when(orderApprovalRepository.findOrderApprovalsByOrderId(any(), any(Sort.class)))
+                .thenThrow(new RuntimeException("err"));
+
+        assertThrows(OrderException.class, () -> service.findOrderApprovalsByOrderId("order1"));
+    }
+
+    @Test
+    void testHandleInsertError_duplicateKey() {
+        Throwable t = new DuplicateKeyException("dup");
+        service.handleInsertError(t, new Object()); // should log info, no exception
+    }
+
+    @Test
+    void testHandleInsertError_otherError() {
+        Throwable t = new RuntimeException("err");
+        service.handleInsertError(t, new Object()); // should log error, no exception
+    }
+
+    @Test
+    void testUpdateStepsStatus_allStatuses() throws OrderException {
+        when(executionStepService.updateSteps(any(), any(), any())).thenReturn(Mono.empty());
+
+        service.processApprovals(orderOutput); // SUCCESS branch
+        orderOutputData.setOrderStatus("FAILED");
+        service.processApprovals(orderOutput); // FAILED branch
+        orderOutputData.setOrderStatus("IN_PROGRESS");
+        service.processApprovals(orderOutput); // IN_PROGRESS branch
+        orderOutputData.setOrderStatus("UNKNOWN");
+        service.processApprovals(orderOutput); // UNKNOWN branch, no updateSteps call
+    }
+}
